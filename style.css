@@ -1,0 +1,409 @@
+/* --- CORE VIEWPORT LAYOUT --- */
+:root {
+    /* Explicitly tells the browser engine to use its built-in dark UI 
+       for scrollbars, form fields, and system alerts. */
+    color-scheme: dark;
+    
+    /* GLOBAL STYLE VARIABLES - Change these to update all fonts and sizes globally */
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-size: 14px;
+}
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+body {
+    width: 100vw;
+    height: 100vh;
+    font-family: var(--font);
+    background-color: #000000;
+}
+
+/* --- THE INVISIBLE INTERFACE WRAPPER --- */
+#ui-capsule {
+    position: fixed;
+    bottom: -20px;
+    left: 16%;
+    width: 370px; /* FIXED PARENT: Logs will now always have 380px of breathing room */
+    height: 387px; /* FIXED HEIGHT: Prevents console from shifting when chat entries are added */
+    display: flex;
+    flex-direction: column;
+    pointer-events: none;
+    z-index: 999;
+}
+
+/* NOTE: The old block that squished the entire #ui-capsule container to 115px has been removed from here! */
+
+/* --- THE VISIBLE COMMAND PANEL BAR --- */
+.input-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    padding: 8px 12px;
+    box-shadow: none;
+    pointer-events: auto;
+
+    /* THE BAR HANDLES TRANSITIONS NOW */
+    width: 100%; 
+    box-sizing: border-box; /* Ensures padding is included in the width calculation */
+    transition: width 0.35s cubic-bezier(0.25, 1, 0.5, 1), background 0.35s ease;
+}
+
+/* --- NO DRAG HITBOX (RETRO PIXELART AESTHETIC) --- */
+.input-line::before {
+    content: none;
+}
+
+#mode-indicator {
+    font-family: var(--font);
+    font-size: var(--font-size);
+    color: #555555;
+    transition: color 0.15s ease;
+    user-select: none;
+    pointer-events: none; 
+    margin-right: 4px;
+}
+
+/* --- VIRTUAL TERMINAL LAYOUT FRAME --- */
+#console-wrapper {
+    position: relative;
+    flex-grow: 1;
+    min-width: 0; /* Prevents long text from physically expanding the flex panel */
+    display: flex;
+    align-items: center;
+    font-size: var(--font-size);
+    font-family: var(--font);
+    min-height: 18px;
+    user-select: none;
+    pointer-events: none;
+    transition: opacity 0.2s ease, max-width 0.2s ease, margin 0.2s ease;
+    max-width: 400px;
+    opacity: 1;
+}
+
+/* --- SHRINK ONLY THE BAR DURING GAMEPLAY --- */
+#ui-capsule.gameplay-mode:not(.focused) .input-line {
+    width: 85px;
+    padding-right: 74px;
+    background: transparent;
+    box-shadow: none;
+    border-color: #005533;
+}
+
+#ui-capsule.gameplay-mode:not(.focused) #console-wrapper {
+    opacity: 0;
+    max-width: 0;
+    margin: 0;
+    pointer-events: none;
+}
+
+/* Turn the indicator grey when retracted */
+#ui-capsule.gameplay-mode:not(.focused) #mode-indicator {
+    color: rgb(85, 85, 85) !important;
+    margin-right: 0px; /* Dropped from 10px to save space */
+}
+
+/* OVERRIDE inline display: none; to automatically activate lobby visibility in gameplay */
+#ui-capsule.gameplay-mode #lobby-status {
+    display: flex !important;
+    margin-left: 0px;
+}
+
+/* Positioned exactly underneath the typing plane */
+#placeholder-text {
+    position: absolute;
+    left: 4px;
+    color: #555555;
+    white-space: nowrap;
+    user-select: none;
+}
+
+/* The new lobby wrapper layout */
+#lobby-status {
+    /* Takes up any leftover empty space on its left, forcing it right */
+    margin-left: auto; 
+    
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    
+    /* Dark grey styling matching placeholder text opacity */
+    color: #555555; 
+    font-family: var(--font);
+    font-size: var(--font-size);
+    user-select: none;
+    padding-left: 6px;
+    white-space: nowrap; /* Keeps everything pinned on one line */
+}
+
+#network-icon {
+    /* Locks the vector box to match your font size scales safely */
+    width: 20px;
+    height: 20px;
+    /* Inherits the exact parent opacity color automatically */
+    color: #555555; 
+    
+    /* Keeps line rendering perfectly sharp on high-DPI displays */
+    stroke-width: 2px; 
+    display: inline-block;
+}
+
+/* --- PING INDICATOR (inside lobby status flex container) --- */
+#ping-indicator {
+    font-family: var(--font);
+    font-size: var(--font-size);
+    font-weight: 500;
+    white-space: nowrap;
+    user-select: none;
+    pointer-events: none;
+    transition: color 0.2s ease;
+}
+
+/* Latency color thresholds */
+#ping-indicator.ping-good {
+    color: #00ff88; /* Green: < 100ms */
+}
+
+#ping-indicator.ping-medium {
+    color: #ffb703; /* Yellow: 100-250ms */
+}
+
+#ping-indicator.ping-bad {
+    color: #ff4444; /* Red: > 250ms */
+}
+
+/* Grey when unfocused in gameplay mode */
+#ui-capsule.gameplay-mode:not(.focused) #ping-indicator {
+    color: rgb(85, 85, 85) !important;
+}
+
+#text-container {
+    display: flex;
+    align-items: center;
+    color: #555555;
+    white-space: pre; /* Crucial for preserving text spaces */
+    width: 100%;      /* Caps width strictly to its parent space */
+    overflow: hidden; /* Hides overflowing characters out of sight */
+    user-select: none;
+    z-index: 2;
+}
+
+/* --- THE RAZOR SHARP CUSTOM CARET --- */
+#custom-caret {
+    width: 2px;
+    height: 14px;
+    background-color: #555555;
+    margin: 0 1px;
+    display: none; /* Controlled completely via JS focus states */
+    flex-shrink: 0; /* Prevents the caret from ever shrinking or expanding in size */
+}
+
+@keyframes terminalBlink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+/* --- THE INVISIBLE INPUT DATA BASKET --- */
+#core-input {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 0;
+    
+    /* STEALTH PROPERTIES: Active, but visually imperceptible */
+    color: transparent;
+    caret-color: transparent;
+    pointer-events: none; 
+    user-select: none;
+}
+
+/* --- FLOATING TEXT LOG LAYERS --- */
+#feedback-log, #chat-log {
+    overflow: hidden;     /* Deletes scrolling capacity completely to eliminate browser jitter */
+    pointer-events: none; /* Clicks and scrolls pass cleanly straight down to the 3D game engine */
+    user-select: none;
+    -webkit-user-select: none;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.8);
+    width: 100%;          /* Forces the log layers to match the full 380px parent width */
+}
+
+#feedback-log {
+    height: 130px;
+    font-size: var(--font-size);
+    line-height: 1.6;
+    padding: 0 6px 6px 6px;
+    display: flex;
+    color: #555555;
+    flex-direction: column;
+    justify-content: flex-end; /* Snaps text lines downwards directly above the console bar */
+}
+.clickthrough {
+    pointer-events: none;
+}
+#chat-log {
+    max-height: 150px;
+    font-size: var(--font-size);
+    line-height: 1.5;
+    padding: 6px 6px 0 6px;
+    overflow: hidden;
+}
+
+/* --- ADVANCED TIMED OPACITY TIMELINES --- */
+@keyframes standardFade {
+    0% { opacity: 1; }
+    80% { opacity: 1; }  /* Stays completely visible for 80% of its duration (~6.4 seconds) */
+    100% { opacity: 0; } /* Smoothly vanishes into the void by second 8 */
+}
+
+.fading-entry {
+    animation: standardFade 8s forwards ease-in-out;
+}
+
+.static-entry {
+    opacity: 1; /* Remains fully illuminated with no timer until network actions execute */
+}
+
+/* --- THREE.JS BACKGROUND CANVAS --- */
+#gameCanvas {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    outline: none;
+
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+
+    z-index: 1;
+    cursor: default;
+}
+
+/* Hide cursor when pointer is locked on the canvas */
+#gameCanvas[data-pointer-locked] {
+    cursor: none !important;
+}
+
+
+/* --- SHIP SELECTOR UI --- */
+.ship-selector {
+    position: fixed;
+    bottom: 195px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    pointer-events: auto;
+    flex-wrap: wrap;
+}
+
+.ship-selector-name {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font);
+    font-size: var(--font-size);
+    color: #555555;
+    text-shadow: none;
+    user-select: none;
+    min-height: 30px;
+}
+
+.ship-selector-arrow {
+    position: relative;
+    background: rgba(25, 25, 28, 0.8);
+    border: none;
+    padding: 8px 12px;
+    font-size: var(--font-size);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+    font-family: var(--font);
+    box-shadow: none;
+    width: 50px;
+    text-align: center;
+}
+
+.ship-selector-arrow:hover:not(.disabled)::after {
+    content: attr(data-hover);
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.ship-selector-arrow:hover:not(.disabled) {
+    background: rgba(0, 255, 136, 0.15);
+}
+
+.ship-selector-arrow:active:not(.disabled) {
+    transform: scale(0.95);
+}
+
+.ship-selector-arrow.disabled {
+    color: #555555;
+    border-color: #555555;
+    background: transparent;
+}
+
+.ship-selector-stats {
+    /* 1. Absolute positions it relative to the .ship-selector row */
+    position: absolute;
+    
+    /* 2. Pushes it completely outside the right edge of the selector menu */
+    left: calc(100% + 180px); 
+    
+    /* 3. Vertically aligns the middle of the stats with the middle of the menu buttons */
+    top: 50%;
+    transform: translateY(-50%); 
+    
+    /* 4. Fixes the squishing—gives your text a dedicated bounding box */
+    width: 550px;        
+    
+    /* 5. Clear out any viewport overrides from before */
+    right: auto;
+
+    /* --- Your Visual Styles --- */
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: var(--font);
+    font-size: var(--font-size);
+    color: #555555;
+    z-index: 99;
+    user-select: none;
+    pointer-events: none;
+}
+
+.stat-row {
+    display: none;
+}
+
+.stat-row:last-child {
+    display: none;
+}
+
+.stat-label {
+    display: none;
+}
+
+.stat-value {
+    display: none;
+}

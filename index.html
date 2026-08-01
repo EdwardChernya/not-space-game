@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="darkreader-lock" content="true">
+    <title>Math Space Game 3D</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="style.css">
+    
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+          "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.3/build/index.module.js"
+        }
+      }
+    </script>
+
+</head>
+
+<body>
+    <div id="ui-capsule">
+        <div id="feedback-log" class="clickthrough"></div>
+
+        <div class="input-line">
+            <div id="mode-indicator">&gt;</div>
+            
+            <div id="console-wrapper">
+                <div id="placeholder-text"></div>
+                <div id="text-container">
+                    <span id="text-left"></span>
+                    <span id="custom-caret"></span>
+                    <span id="text-right"></span>
+                </div>
+            </div>
+
+            <div id="lobby-status" style="display: none;">
+                <span id="player-count">1/4</span>
+                
+                <svg id="network-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="2" y1="12" x2="22" y2="12"></line>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                </svg>
+                
+                <span id="ping-indicator"></span>
+            </div>
+        </div>
+
+        <div id="chat-log" class="clickthrough"></div>
+    </div>
+    
+    <canvas id="gameCanvas"></canvas>
+
+    <script type="module" src="game.js"></script>
+
+</body>
+
+</html>
