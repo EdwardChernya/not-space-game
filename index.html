@@ -25,9 +25,16 @@
             host: 'not-space-game.onrender.com',
             port: 443,
             secure: true,
-            path: '/peerjs'
+            path: '/peerjs',
+
+            // Server endpoint that mints short-lived Cloudflare TURN credentials.
+            // Without a TURN relay, peers on separate machines cannot connect when
+            // the direct LAN/NAT path is blocked (firewall, AP isolation, no
+            // hairpin NAT). Falls back to STUN-only if this is unreachable.
+            iceEndpoint: 'https://not-space-game.onrender.com/ice'
         };
     </script>
+
 
 </head>
 

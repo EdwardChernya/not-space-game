@@ -48,7 +48,78 @@ let connectionTimeout = null;
 let intentionalDisconnect = false;  // Flag: skip host migration when user intentionally quits
 let gameplayScene = null;
 
-function getPeerConfig() {
+// ============================================================================
+// ICE SERVER RESOLUTION
+// ----------------------------------------------------------------------------
+// STUN alone only *discovers* our address - it never carries data. When the
+// direct path between two machines is blocked (Windows Firewall, router AP
+// isolation, mDNS filtering, or a router that won't hairpin NAT), the only way
+// through is a TURN relay. We fetch short-lived TURN credentials from our own
+// server, which mints them via Cloudflare.
+// ============================================================================
+const FALLBACK_ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' }
+];
+
+let cachedIceServers = null;
+
+function describeIceServers(iceServers) {
+    const urls = iceServers.flatMap(entry => (Array.isArray(entry.urls) ? entry.urls : [entry.urls]));
+    return {
+        stun: urls.filter(u => typeof u === 'string' && u.startsWith('stun')).length,
+        turn: urls.filter(u => typeof u === 'string' && u.startsWith('turn')).length
+    };
+}
+
+export async function fetchIceServers() {
+    if (cachedIceServers) return cachedIceServers;
+
+    const overrides = window.PEERJS_CONFIG || window.__NSPACE_PEERJS_CONFIG__ || {};
+
+    // Explicit iceServers in the page config win outright (useful for testing).
+    if (overrides.config?.iceServers) {
+        cachedIceServers = overrides.config.iceServers;
+        return cachedIceServers;
+    }
+
+    if (!overrides.iceEndpoint) {
+        console.warn('[ICE] No iceEndpoint configured - using STUN only (no relay fallback)');
+        cachedIceServers = FALLBACK_ICE_SERVERS;
+        return cachedIceServers;
+    }
+
+    try {
+        // Never let a cold/slow server block the game from starting.
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), 5000);
+
+        const response = await fetch(overrides.iceEndpoint, { signal: controller.signal });
+        clearTimeout(abortTimer);
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+        if (!Array.isArray(data.iceServers) || data.iceServers.length === 0) {
+            throw new Error('Response contained no iceServers');
+        }
+
+        cachedIceServers = data.iceServers;
+        const counts = describeIceServers(cachedIceServers);
+        console.log(`[ICE] Fetched ICE config (source: ${data.source}) - ${counts.stun} STUN, ${counts.turn} TURN urls`);
+
+        if (counts.turn === 0) {
+            console.warn('[ICE] No TURN relay available - connections between different machines may fail');
+        }
+        return cachedIceServers;
+    } catch (err) {
+        console.error('[ICE] Failed to fetch ICE servers, falling back to STUN only:', err.message);
+        cachedIceServers = FALLBACK_ICE_SERVERS;
+        return cachedIceServers;
+    }
+}
+
+function getPeerConfig(iceServers) {
     const overrides = window.PEERJS_CONFIG || window.__NSPACE_PEERJS_CONFIG__ || {};
     const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     const host = overrides.host || (isLocalhost ? 'localhost' : '0.peerjs.com');
@@ -63,13 +134,107 @@ function getPeerConfig() {
         path,
         debug: 2,
         config: {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:global.stun.twilio.com:3478' }
-            ]
+            iceServers: iceServers || cachedIceServers || FALLBACK_ICE_SERVERS,
+            iceCandidatePoolSize: 4
         }
     };
 }
+
+// ============================================================================
+// ICE DIAGNOSTICS
+// ----------------------------------------------------------------------------
+// A failed WebRTC connection is otherwise completely silent: the DataConnection
+// simply never opens and no 'error' event fires. These hooks turn that silence
+// into an actionable diagnosis.
+// ============================================================================
+function attachIceDiagnostics(conn, label) {
+    const gathered = { host: 0, srflx: 0, relay: 0, prflx: 0 };
+    conn.__iceGathered = gathered;
+
+    const pc = conn.peerConnection;
+    if (!pc) {
+        // peerConnection isn't created synchronously in all PeerJS paths.
+        setTimeout(() => {
+            if (conn.peerConnection && !conn.__iceHooked) attachIceDiagnostics(conn, label);
+        }, 100);
+        return;
+    }
+    conn.__iceHooked = true;
+
+    pc.addEventListener('icecandidate', (event) => {
+        if (!event.candidate || !event.candidate.candidate) return;
+        const type = event.candidate.type || (event.candidate.candidate.split(' ')[7]);
+        if (type in gathered) gathered[type]++;
+    });
+
+    pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') {
+            console.log(`[ICE:${label}] Gathered candidates:`, gathered);
+        }
+    });
+
+    pc.addEventListener('iceconnectionstatechange', () => {
+        const state = pc.iceConnectionState;
+        console.log(`[ICE:${label}] connection state: ${state}`);
+
+        if (state === 'connected' || state === 'completed') {
+            void logSelectedCandidatePair(pc, label);
+        } else if (state === 'failed') {
+            console.error(`[ICE:${label}] NEGOTIATION FAILED`);
+            console.error(`[ICE:${label}] ${explainIceFailure(gathered)}`);
+            if (logFeedback) {
+                logFeedback(`<span style="color: #ff4444;">LINK FAILED: ${explainIceFailure(gathered)}</span>`);
+            }
+            if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+                connectionTimeout = null;
+            }
+            if (!gameState.meta.isHost) disconnectNetwork();
+        }
+    });
+}
+
+function explainIceFailure(gathered) {
+    if (gathered.srflx === 0 && gathered.relay === 0) {
+        return 'No STUN/TURN candidates gathered - UDP is likely blocked on this network.';
+    }
+    if (gathered.relay === 0) {
+        return 'No TURN relay candidates - direct path blocked and no relay available. Check TURN credentials.';
+    }
+    return 'Relay was available but no candidate pair succeeded - possible firewall or restrictive proxy.';
+}
+
+async function logSelectedCandidatePair(pc, label) {
+    try {
+        const stats = await pc.getStats();
+        let pair = null;
+        const candidates = new Map();
+
+        stats.forEach(report => {
+            if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                candidates.set(report.id, report);
+            }
+            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                pair = report;
+            }
+        });
+
+        if (pair) {
+            const local = candidates.get(pair.localCandidateId);
+            const remote = candidates.get(pair.remoteCandidateId);
+            const localDesc = `${local?.candidateType}(${local?.protocol})`;
+            const remoteDesc = `${remote?.candidateType}(${remote?.protocol})`;
+            console.log(`[ICE:${label}] Selected pair: ${localDesc} <-> ${remoteDesc}`);
+
+            if (local?.candidateType === 'relay' || remote?.candidateType === 'relay') {
+                console.log(`[ICE:${label}] Using TURN relay - the direct path was blocked.`);
+            }
+        }
+    } catch (err) {
+        console.warn(`[ICE:${label}] Could not read connection stats:`, err.message);
+    }
+}
+
 
 // Helper to get connections array (for dependency injection)
 function getConnections() { return connections; }
@@ -96,7 +261,7 @@ function generateRoomCode() {
 // ============================================================================
 // HOST INITIALIZATION ENGINE
 // ============================================================================
-export function initHost(onFeedbackLog, onChatLog, onDisconnect) {
+export async function initHost(onFeedbackLog, onChatLog, onDisconnect) {
     logFeedback = onFeedbackLog;
     logChat = onChatLog;
     onNetworkDisconnectCallback = onDisconnect;
@@ -107,9 +272,14 @@ export function initHost(onFeedbackLog, onChatLog, onDisconnect) {
     setMessageDependencies(broadcastToAll, logChat, logFeedback, () => peer, () => connection, disconnectNetwork, null, getGameplayScene, () => globalBeamPool, () => globalSparkPool);
     setCannonWeaponDependencies(() => connection, broadcastToAll);
 
+    // Resolve TURN/STUN credentials before opening the peer - the ICE config
+    // cannot be changed after the connection is created.
+    const iceServers = await fetchIceServers();
+
     // Generate a short room code and use it as our Peer ID
     const roomCode = generateRoomCode();
-    peer = new Peer(`nspace-${roomCode}`, getPeerConfig());
+    peer = new Peer(`nspace-${roomCode}`, getPeerConfig(iceServers));
+
 
     // Initialize join order with host as first entry
     initJoinOrder();
@@ -147,9 +317,13 @@ export function initHost(onFeedbackLog, onChatLog, onDisconnect) {
             return;
         }
 
+        // Surface ICE progress for this incoming client.
+        attachIceDiagnostics(conn, `host:${conn.peer}`);
+
         // Pass the raw connection into our unified data router
         setupDataChannel(conn);
     });
+
 
     peer.on('error', (err) => {
         console.error('[NETWORK] PeerJS host error:', err);
@@ -161,7 +335,7 @@ export function initHost(onFeedbackLog, onChatLog, onDisconnect) {
 // ============================================================================
 // CLIENT INITIALIZATION ENGINE
 // ============================================================================
-export function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnect) {
+export async function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnect) {
     logFeedback = onFeedbackLog;
     logChat = onChatLog;
     onNetworkDisconnectCallback = onDisconnect;
@@ -172,15 +346,18 @@ export function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnect) {
     setMessageDependencies(broadcastToAll, logChat, logFeedback, () => peer, () => connection, disconnectNetwork, null, getGameplayScene, () => globalBeamPool, () => globalSparkPool);
     setCannonWeaponDependencies(() => connection, broadcastToAll);
 
-    peer = new Peer(undefined, getPeerConfig());
+    // Resolve TURN/STUN credentials before opening the peer - the ICE config
+    // cannot be changed after the connection is created.
+    const iceServers = await fetchIceServers();
 
-    peer.on('open', () => {
-        console.log('[NETWORK] PeerJS client opened with id', peer.id);
-    });
+    peer = new Peer(undefined, getPeerConfig(iceServers));
 
     peer.on('error', (err) => {
-        if (err.type === 'peer-not-found') {
-            logFeedback(`<span style="color: #ff4444;">LINK FAILED: Target token "${roomCode}" not found.</span>`);
+        console.error('[NETWORK] PeerJS client error:', err.type, err);
+
+        // NOTE: PeerJS emits 'peer-unavailable', NOT 'peer-not-found'.
+        if (err.type === 'peer-unavailable') {
+            logFeedback(`<span style="color: #ff4444;">LINK FAILED: Room "${roomCode}" not found. Check the code and that the host is still online.</span>`);
         } else if (err.type === 'network' || err.type === 'server-error') {
             logFeedback(`<span style="color: #ff4444;">LINK FAILED: Network error (${err.type}). Retrying...</span>`);
             // Don't disconnect on transient network errors — let PeerJS retry
@@ -192,6 +369,8 @@ export function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnect) {
     });
 
     peer.on('open', () => {
+        console.log('[NETWORK] PeerJS client opened with id', peer.id);
+
         // Resolve the room code to the full Peer ID
         // Short codes get the "nspace-" prefix, full UUIDs are used as-is
         const fullPeerId = roomCode.includes('-') && roomCode.length <= 7
@@ -214,15 +393,27 @@ export function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnect) {
             logFeedback(`<span style="color: #ff4444;">CONNECTION ERROR: ${err.type || 'unknown'}</span>`);
         });
 
+        // Surface ICE progress - without this a failure is completely silent.
+        attachIceDiagnostics(connection, 'client');
+
         setupDataChannel(connection);
 
-        // Increased timeout: 15 seconds (was 5)
+        // 30s covers a cold-starting free-tier signaling server. ICE failures
+        // are reported immediately by attachIceDiagnostics, so this only fires
+        // when nothing at all is happening.
         connectionTimeout = setTimeout(() => {
-            logFeedback('<span style="color: #ff4444;">LINK TIMEOUT: Server non-responsive after 15s. Aborting.</span>');
+            const gathered = connection?.__iceGathered;
+            let detail = 'No response from host.';
+            if (gathered) {
+                detail = explainIceFailure(gathered);
+                console.error('[ICE:client] Timed out. Candidates gathered:', gathered);
+            }
+            logFeedback(`<span style="color: #ff4444;">LINK TIMEOUT (30s): ${detail}</span>`);
             disconnectNetwork();
-        }, 15000);
+        }, 30000);
     });
 }
+
 
 // ============================================================================
 // UNIFIED DATA CHANNEL ROUTER
@@ -422,11 +613,20 @@ export function disconnectNetwork() {
     // Reset join order
     initJoinOrder();
     getClientLastPong().clear();
+    cachedIceServers = null;   // Re-fetch credentials on the next session
+
+    // Clear the latch AFTER the pending 'close' events have flushed. Resetting
+    // it synchronously would defeat its purpose (close fires on a later tick),
+    // but leaving it latched forever means the next genuine host drop gets
+    // silently swallowed and host migration never runs.
+    setTimeout(() => { intentionalDisconnect = false; }, 1000);
 
     if (onNetworkDisconnectCallback) {
         onNetworkDisconnectCallback();
     }
 }
+
+
 
 // Re-export getLatencyMs from heartbeat module
 export { getLatencyMs };

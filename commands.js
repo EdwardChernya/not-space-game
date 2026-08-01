@@ -68,15 +68,22 @@ function handleHost() {
     logToFeedback('Contacting sub-space signaling array...');
 }
 
-function handleJoin(roomCode) {
+function handleJoin(rawRoomCode) {
     if (currentGameState !== STATES.MAIN_MENU) {
         logToFeedback(`<span style="color: #ffaa00;">CRITICAL ERROR: Link connection rejected.</span>`);
         return;
     }
-    if (!roomCode) {
+    if (!rawRoomCode) {
         logToFeedback('ERROR: Room token required. Usage: join [code]');
         return;
     }
+
+    // Peer IDs are case-sensitive and codes are always generated uppercase.
+    // Without this, a hand-typed "abc-123" silently fails to find "ABC-123" -
+    // a trap that only appears when joining from a second machine, since
+    // same-machine testing pastes the auto-copied (already uppercase) code.
+    const roomCode = rawRoomCode.trim().toUpperCase();
+
 
     startMultiplayerSession(false, roomCode);
 
