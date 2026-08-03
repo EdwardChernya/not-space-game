@@ -48,6 +48,11 @@ let connectionTimeout = null;
 let intentionalDisconnect = false;  // Flag: skip host migration when user intentionally quits
 let gameplayScene = null;
 
+// Reconnection state: backoff for recoverable signaling failures
+let reconnectAttempt = 0;
+let reconnectTimeout = null;
+
+
 // ============================================================================
 // ICE SERVER RESOLUTION
 // ----------------------------------------------------------------------------
@@ -133,12 +138,14 @@ function getPeerConfig(iceServers) {
         secure,
         path,
         debug: 2,
+        ping: 3000,        // Send heartbeat every 3s instead of the default 5s (gives throttled tabs margin)
         config: {
             iceServers: iceServers || cachedIceServers || FALLBACK_ICE_SERVERS,
             iceCandidatePoolSize: 4
         }
     };
 }
+
 
 // ============================================================================
 // ICE DIAGNOSTICS
@@ -247,6 +254,63 @@ export function setGameplayScene(scene) {
 }
 
 // ============================================================================
+// SIGNALING RESILIENCE
+// ============================================================================
+// The signaling server is just a matchmaker — once DataChannels are open, 
+// gameplay continues peer-to-peer. A broken signaling socket is recoverable
+// and should NOT tear down an active session.
+// ============================================================================
+
+function isFatalPeerError(errType) {
+    // These errors mean the peer ID is invalid or unrecoverable - full teardown.
+    const fatalErrors = new Set([
+        'invalid-id',
+        'invalid-key',
+        'unavailable-id',
+        'browser-incompatible',
+        'ssl-unavailable',
+        'peer-unavailable'  // Host doesn't exist on the signaling server
+    ]);
+    return fatalErrors.has(errType);
+}
+
+function isRecoverableError(errType) {
+    // These are transient signaling issues - keep the session alive.
+    const recoverableErrors = new Set([
+        'network',
+        'server-error',
+        'socket-error',
+        'socket-closed',
+        'disconnected'
+    ]);
+    return recoverableErrors.has(errType);
+}
+
+function scheduleReconnect() {
+    if (reconnectTimeout) return;  // Already scheduled
+
+    const backoffMs = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000);
+    reconnectAttempt++;
+
+    console.log(`[NETWORK] Scheduling reconnect in ${backoffMs}ms (attempt ${reconnectAttempt})`);
+    reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
+        if (peer && !peer.destroyed) {
+            console.log('[NETWORK] Attempting signaling reconnection...');
+            peer.reconnect();
+        }
+    }, backoffMs);
+}
+
+function resetReconnectState() {
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+    reconnectAttempt = 0;
+}
+
+// ============================================================================
 // ROOM CODE GENERATION
 // ============================================================================
 function generateRoomCode() {
@@ -257,6 +321,7 @@ function generateRoomCode() {
     }
     return code.slice(0, 3) + '-' + code.slice(3); // e.g. "ABC-123"
 }
+
 
 // ============================================================================
 // HOST INITIALIZATION ENGINE
@@ -326,11 +391,27 @@ export async function initHost(onFeedbackLog, onChatLog, onDisconnect) {
 
 
     peer.on('error', (err) => {
-        console.error('[NETWORK] PeerJS host error:', err);
-        logFeedback(`<span style="color: #ff4444;">SIGNALING ERROR: ${err.type}</span>`);
-        disconnectNetwork();
+        console.error('[NETWORK] PeerJS host error:', err.type, err);
+        
+        if (isFatalPeerError(err.type)) {
+            logFeedback(`<span style="color: #ff4444;">SIGNALING ERROR: ${err.type} - session ended.</span>`);
+            disconnectNetwork();
+        } else if (isRecoverableError(err.type)) {
+            logFeedback(`<span style="color: #ffaa00;">Signaling link lost - gameplay continues, reconnecting...</span>`);
+            scheduleReconnect();
+        } else {
+            console.warn('[NETWORK] Unknown error type, treating as recoverable:', err.type);
+            scheduleReconnect();
+        }
+    });
+
+    peer.on('disconnected', () => {
+        console.log('[NETWORK] PeerJS disconnected from signaling server');
+        logFeedback(`<span style="color: #ffaa00;">Signaling link lost - gameplay continues, reconnecting...</span>`);
+        scheduleReconnect();
     });
 }
+
 
 // ============================================================================
 // CLIENT INITIALIZATION ENGINE
@@ -355,18 +436,28 @@ export async function initClient(roomCode, onFeedbackLog, onChatLog, onDisconnec
     peer.on('error', (err) => {
         console.error('[NETWORK] PeerJS client error:', err.type, err);
 
-        // NOTE: PeerJS emits 'peer-unavailable', NOT 'peer-not-found'.
-        if (err.type === 'peer-unavailable') {
-            logFeedback(`<span style="color: #ff4444;">LINK FAILED: Room "${roomCode}" not found. Check the code and that the host is still online.</span>`);
-        } else if (err.type === 'network' || err.type === 'server-error') {
-            logFeedback(`<span style="color: #ff4444;">LINK FAILED: Network error (${err.type}). Retrying...</span>`);
-            // Don't disconnect on transient network errors — let PeerJS retry
-            return;
+        if (isFatalPeerError(err.type)) {
+            if (err.type === 'peer-unavailable') {
+                logFeedback(`<span style="color: #ff4444;">LINK FAILED: Room "${roomCode}" not found. Check the code and that the host is still online.</span>`);
+            } else {
+                logFeedback(`<span style="color: #ff4444;">LINK FAILED: ${err.type} - session ended.</span>`);
+            }
+            disconnectNetwork();
+        } else if (isRecoverableError(err.type)) {
+            logFeedback(`<span style="color: #ffaa00;">Signaling link lost - gameplay continues, reconnecting...</span>`);
+            scheduleReconnect();
         } else {
-            logFeedback(`<span style="color: #ff4444;">LINK FAILED: Aborted (${err.type}).</span>`);
+            console.warn('[NETWORK] Unknown error type, treating as recoverable:', err.type);
+            scheduleReconnect();
         }
-        disconnectNetwork();
     });
+
+    peer.on('disconnected', () => {
+        console.log('[NETWORK] PeerJS client disconnected from signaling server');
+        logFeedback(`<span style="color: #ffaa00;">Signaling link lost - gameplay continues, reconnecting...</span>`);
+        scheduleReconnect();
+    });
+
 
     peer.on('open', () => {
         console.log('[NETWORK] PeerJS client opened with id', peer.id);

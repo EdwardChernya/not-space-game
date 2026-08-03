@@ -122,19 +122,27 @@ export function updateMovement(deltaTime, cam) {
 
     updateShipThrustVisuals(localPlayerShip, throttle, deltaTime);
 
-    // Reuse a single pre-allocated quaternion and euler for visuals
-    _currentDeltaQuat.copy(currentQuaternion).invert().multiply(targetQuaternion);
-    if (Math.abs(_currentDeltaQuat.w) < 0.9999) {
-        _frameDeltaEuler.setFromQuaternion(_currentDeltaQuat, 'YXZ');
-        _frameDeltaEuler.x = _normalizeAngle(_frameDeltaEuler.x);
-        _frameDeltaEuler.y = _normalizeAngle(_frameDeltaEuler.y);
-        _frameDeltaEuler.z = _normalizeAngle(_frameDeltaEuler.z);
+     // Reuse a single pre-allocated quaternion and euler for visuals
+     _currentDeltaQuat.copy(currentQuaternion).invert().multiply(targetQuaternion);
+     if (Math.abs(_currentDeltaQuat.w) < 0.9999) {
+         // **CRITICAL FIX**: Canonicalize quaternion hemisphere before Euler decomposition
+         if (_currentDeltaQuat.w < 0) {
+             _currentDeltaQuat.x *= -1;
+             _currentDeltaQuat.y *= -1;
+             _currentDeltaQuat.z *= -1;
+             _currentDeltaQuat.w *= -1;
+         }
+         
+         _frameDeltaEuler.setFromQuaternion(_currentDeltaQuat, 'YXZ');
+         _frameDeltaEuler.x = _normalizeAngle(_frameDeltaEuler.x);
+         _frameDeltaEuler.y = _normalizeAngle(_frameDeltaEuler.y);
+         _frameDeltaEuler.z = _normalizeAngle(_frameDeltaEuler.z);
 
-        updateShipAuxVisuals(localPlayerShip, _frameDeltaEuler);
-    } else {
-        _frameDeltaEuler.set(0, 0, 0);
-        updateShipAuxVisuals(localPlayerShip, _frameDeltaEuler);
-    }
+         updateShipAuxVisuals(localPlayerShip, _frameDeltaEuler);
+     } else {
+         _frameDeltaEuler.set(0, 0, 0);
+         updateShipAuxVisuals(localPlayerShip, _frameDeltaEuler);
+     }
     
     // Write state back to gameState
     const player = gameState.players[peerId];
@@ -242,6 +250,16 @@ function applyPerAxisRotation(dt) {
     // Reuse static scratchpads in place
     _currentDeltaQuat.copy(currentQuaternion).invert().multiply(targetQuaternion);
     if (Math.abs(_currentDeltaQuat.w) > 0.99999) return;
+
+    // **CRITICAL FIX**: Canonicalize quaternion hemisphere to ensure we decompose
+    // via the shortest path. Prevents the Euler decomposition from picking a path
+    // that's >180°, which would cause sudden ±π jumps in individual axes.
+    if (_currentDeltaQuat.w < 0) {
+        _currentDeltaQuat.x *= -1;
+        _currentDeltaQuat.y *= -1;
+        _currentDeltaQuat.z *= -1;
+        _currentDeltaQuat.w *= -1;
+    }
 
     _frameDeltaEuler.setFromQuaternion(_currentDeltaQuat, 'YXZ');
 

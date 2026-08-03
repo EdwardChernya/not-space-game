@@ -10,7 +10,12 @@ let isPanning = false;
 let previousMousePosition = { x: 0, y: 0 };
 let _canvas = null;
 
-const radius = 8.0; 
+const radius = 8.0;
+
+// --- INPUT CLAMPING (prevents pointer-lock spikes from causing instant 180° flips) ---
+const MAX_MOVEMENT_DELTA_PER_FRAME = 100; // px; anything larger is probably a spike
+const MAX_ANGULAR_LAG = 0.6; // radians; keep orbitQuat & targetOrbitQuat within this arc
+const MAX_DELTA_TIME = 0.05; // seconds; clamps GC hitches/tab switches
 
 // Single quaternion combining pitch, yaw, and roll
 const orbitQuat = new THREE.Quaternion().setFromEuler(
@@ -50,6 +55,8 @@ const _scratchEuler = new THREE.Euler();
 
 /**
  * Helper to smoothly rotate targetOrbitQuat around its OWN local axes (Zero Allocation)
+ * Also clamps the lag between displayed and input-target quaternions to prevent
+ * the slerp from ever taking a path >180°, which would cause sudden flips.
  */
 function applyLocalRotation(pitch, yaw, roll) {
     // 1. Mutate directional axes in place instead of creating new instances
@@ -68,6 +75,18 @@ function applyLocalRotation(pitch, yaw, roll) {
     targetOrbitQuat.premultiply(_rollQuat);
 
     targetOrbitQuat.normalize();
+    
+    // 4. **CRITICAL FIX**: Clamp the angular distance between displayed and target
+    //    to prevent the slerp interpolation from ever crossing the ambiguous π boundary.
+    const angularGap = orbitQuat.angleTo(targetOrbitQuat);
+    if (angularGap > MAX_ANGULAR_LAG) {
+        // Pull targetOrbitQuat back toward orbitQuat so the gap is within the limit.
+        // This prevents the lag from ever reaching the degenerate region where slerp
+        // picks the opposite hemisphere (which reads as an instant 180° flip).
+        _slerpTargetQuat.copy(targetOrbitQuat);
+        targetOrbitQuat.copy(orbitQuat);
+        targetOrbitQuat.slerp(_slerpTargetQuat, MAX_ANGULAR_LAG / angularGap);
+    }
 }
 
 /**
@@ -83,6 +102,7 @@ export function initCamera(canvas) {
 
     canvas.addEventListener('mousedown', (e) => {
         e.preventDefault();
+        // Reset previousMousePosition on new drag to prevent stale state
         previousMousePosition = { x: e.clientX, y: e.clientY };
         if (e.button === 0) isDragging = true;
         else if (e.button === 2 && enablePanning) isPanning = true;
@@ -93,16 +113,23 @@ export function initCamera(canvas) {
         const locked = isPointerLocked();
 
         if (inGameplay && locked) {
-            const dx = e.movementX || 0;
-            const dy = e.movementY || 0;
+            // Clamp pointer-lock deltas to kill movement spikes (which can cause instant 180° flips)
+            const dx = Math.max(-MAX_MOVEMENT_DELTA_PER_FRAME, Math.min(MAX_MOVEMENT_DELTA_PER_FRAME, e.movementX || 0));
+            const dy = Math.max(-MAX_MOVEMENT_DELTA_PER_FRAME, Math.min(MAX_MOVEMENT_DELTA_PER_FRAME, e.movementY || 0));
             applyLocalRotation(-dy * 0.007, -dx * 0.007, 0);
+            // IMPORTANT: Still update previousMousePosition even though we return
+            previousMousePosition = { x: e.clientX, y: e.clientY };
             return;
         }
 
-        if (!isDragging && !isPanning) return;
+        if (!isDragging && !isPanning) {
+            // Always update previousMousePosition to prevent stale position on next drag
+            previousMousePosition = { x: e.clientX, y: e.clientY };
+            return;
+        }
 
-        const deltaX = locked ? e.movementX : (e.clientX - previousMousePosition.x);
-        const deltaY = locked ? e.movementY : (e.clientY - previousMousePosition.y);
+        const deltaX = locked ? Math.max(-MAX_MOVEMENT_DELTA_PER_FRAME, Math.min(MAX_MOVEMENT_DELTA_PER_FRAME, e.movementX)) : (e.clientX - previousMousePosition.x);
+        const deltaY = locked ? Math.max(-MAX_MOVEMENT_DELTA_PER_FRAME, Math.min(MAX_MOVEMENT_DELTA_PER_FRAME, e.movementY)) : (e.clientY - previousMousePosition.y);
 
         if (isDragging) {
             applyLocalRotation(-deltaY * 0.007, -deltaX * 0.007, 0);
@@ -127,6 +154,8 @@ export function initCamera(canvas) {
         if (!isPointerLocked()) {
             isDragging = false;
             isPanning = false;
+            // Reset previousMousePosition when pointer lock is lost to prevent stale coordinate jump
+            previousMousePosition = { x: 0, y: 0 };
         }
     });
 
@@ -141,10 +170,26 @@ function updateCameraPositionImmediate() {
 }
 
 export function updateCamera(deltaTime = 0.016) {
-    const panFactor = 1 - Math.exp(-PAN_SPEED * deltaTime);
-    const orbitFactor = 1 - Math.exp(-ORBIT_SPEED * deltaTime);
+    if (!camera) return;
+    
+    // Clamp deltaTime to prevent massive jumps after GC pauses or tab switches
+    const dt = Math.max(0, Math.min(deltaTime, MAX_DELTA_TIME));
+    
+    const panFactor = 1 - Math.exp(-PAN_SPEED * dt);
+    const orbitFactor = 1 - Math.exp(-ORBIT_SPEED * dt);
 
-    orbitQuat.slerp(targetOrbitQuat, orbitFactor);
+    // **CRITICAL FIX**: Canonicalize quaternion hemisphere before slerp
+    // Ensures we always interpolate via the shortest path and never flip suddenly.
+    // q and -q represent the same rotation; we keep targetOrbitQuat in the same
+    // hemisphere as orbitQuat so slerp doesn't accidentally negate and reverse direction.
+    if (orbitQuat.dot(targetOrbitQuat) < 0) {
+        targetOrbitQuat.x *= -1;
+        targetOrbitQuat.y *= -1;
+        targetOrbitQuat.z *= -1;
+        targetOrbitQuat.w *= -1;
+    }
+
+    orbitQuat.slerp(targetOrbitQuat, orbitFactor).normalize();
     panTarget.lerp(targetPan, panFactor);
     updateCameraPositionImmediate();
 }

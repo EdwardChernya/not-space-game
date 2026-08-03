@@ -145,9 +145,10 @@ const peerServer = ExpressPeerServer(server, {
     path: '/',
     proxied: true,        // Render terminates TLS in front of us
     allow_discovery: false,
-    alive_timeout: 60000,
+    alive_timeout: 120000,  // Increased from 60s to allow throttled background tabs (Chrome throttles timers to ~1/min)
     key: 'peerjs'
 });
+
 
 app.use('/peerjs', peerServer);
 
