@@ -48,6 +48,7 @@ const _localForward = new THREE.Vector3();
 const _pitchQuat = new THREE.Quaternion();
 const _yawQuat = new THREE.Quaternion();
 const _rollQuat = new THREE.Quaternion();
+const _slerpTargetQuat = new THREE.Quaternion();
 
 const _cameraOffsetMat = new THREE.Vector3();
 const _staticBaseEuler = new THREE.Euler(-0.3, 0, 0, 'YXZ');
